@@ -14,8 +14,10 @@ env:
   - CC=gcc-4.6 CFLAGS="-g" VALGRIND=1
 
 install:
-  - if [ "$VALGRIND" -eq 1 ]; then sudo apt-get install valgrind; export TEST_PHP_ARGS="-m"; fi
-  - sudo apt-get install $CC
+  - sudo apt-get update -qq
+  - if [ "$VALGRIND" -eq 1 ]; then sudo apt-get install -qq valgrind; export TEST_PHP_ARGS="-m"; fi
+  - sudo apt-get install -qq $CC
+  - if [ "$VALGRIND" -eq 1 ]; then valgrind --version; fi
   - $CC --version
 
 script:
@@ -25,3 +27,7 @@ script:
   - perl -i -pe 's/\-\@if/\@if/' Makefile
   - make
   - REPORT_EXIT_STATUS=1 NO_INTERACTION=1 make test
+
+branches:
+  only:
+    - master
