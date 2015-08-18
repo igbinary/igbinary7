@@ -8,11 +8,13 @@ if(!extension_loaded('igbinary')) {
 }
 
 function test($type, $variable) {
-	$serialized = igbinary_serialize($variable);
-	$unserialized = igbinary_unserialize($serialized);
 
 	echo $type, "\n";
+	$serialized = igbinary_serialize($variable);
+
 	echo substr(bin2hex($serialized), 8), "\n";
+
+	$unserialized = igbinary_unserialize("\0\0\0\x02");
 	echo $unserialized === $variable ? 'OK' : 'ERROR';
 	echo "\n";
 }

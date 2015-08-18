@@ -36,8 +36,12 @@ $b = array(1, 2, $a);
 $exp = $a;
 $act = igbinary_unserialize(igbinary_serialize($a));
 
-$dump_exp = print_r($exp, true);
-$dump_act = print_r($act, true);
+ob_start();
+var_dump($exp);
+$dump_exp = ob_get_clean();
+ob_start();
+var_dump($act);
+$dump_act = ob_get_clean();
 
 if ($dump_act !== $dump_exp) {
 	echo "Var dump differs:\n", $dump_act, "\n", $dump_exp, "\n";

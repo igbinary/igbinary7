@@ -13,7 +13,10 @@ function test($type, $variable, $test) {
 
 	echo $type, "\n";
 	echo substr(bin2hex($serialized), 8), "\n";
-	echo $test || $unserialized == $variable ? 'OK' : 'ERROR';
+	echo $test || $unserialized == $variable ? 'OK' : 'ERROR', "\n";
+	if ($unserialized != $variable) {
+		var_dump($variable, $unserialized);
+	}
 	echo "\n";
 }
 

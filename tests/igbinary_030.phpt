@@ -17,7 +17,7 @@ $datas = array(
 	0.187182,
 	"dakjdh98389\000",
 	null,
-	(object)array(1,2,3),
+	(object)array(1,2,3,4,5,6,7,8,9,"asdfkjlas dlfjl asjdlkfklashlkdflhkahsd"),
 );
 
 error_reporting(0);

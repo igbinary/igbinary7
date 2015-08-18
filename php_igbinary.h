@@ -28,7 +28,7 @@ ZEND_END_MODULE_GLOBALS(igbinary)
 #include "TSRM.h"
 #endif
 
-#include "ext/standard/php_smart_str.h"
+#include "ext/standard/php_smart_string.h"
 
 /** Module init function. */
 PHP_MINIT_FUNCTION(igbinary);

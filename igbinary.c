@@ -17,16 +17,23 @@
 
 #include "php.h"
 #include "php_ini.h"
-#include "zend_dynamic_array.h"
 #include "zend_alloc.h"
 #include "ext/standard/info.h"
 #include "ext/standard/php_var.h"
+
+#if PHP_MAJOR_VERSION >= 7
+/* FIXME: still fix sessions and the APC-thingy */
+# undef HAVE_PHP_SESSION
+# undef HAVE_APC_SUPPORT
+# undef HAVE_APCU_SUPPORT
+#endif
 
 #if HAVE_PHP_SESSION
 # include "ext/session/php_session.h"
 #endif /* HAVE_PHP_SESSION */
 
 #include "ext/standard/php_incomplete_class.h"
+
 
 #if defined(HAVE_APCU_SUPPORT)
 # include "ext/apcu/apc_serializer.h"
@@ -158,13 +165,20 @@ struct igbinary_unserialize_data {
 	size_t strings_count;			/**< Unserialized string count. */
 	size_t strings_capacity;		/**< Unserialized string array capacity. */
 
-	void **references;				/**< Unserialized Arrays/Objects. */
+	zval **references;				/**< Unserialized Arrays/Objects. */
 	size_t references_count;		/**< Unserialized array/objects count. */
 	size_t references_capacity;		/**< Unserialized array/object array capacity. */
 
 	int error;						/**< Error number. Not used. */
-	smart_str string0_buf;			/**< Temporary buffer for strings */
+	smart_string string0_buf;			/**< Temporary buffer for strings */
 };
+
+#define IGB_REF_VAL(igsd, n)	((igsd)->references[(n)])
+
+#define WANT_CLEAR     (0)
+#define WANT_OBJECT    (1<<0)
+#define WANT_REF       (1<<1)
+
 /* }}} */
 /* {{{ Memory allocator wrapper prototypes */
 static inline void *igbinary_mm_wrapper_malloc(size_t size, void *context);
@@ -213,12 +227,12 @@ inline static int igbinary_unserialize_double(struct igbinary_unserialize_data *
 inline static int igbinary_unserialize_string(struct igbinary_unserialize_data *igsd, enum igbinary_type t, char **s, size_t *len TSRMLS_DC);
 inline static int igbinary_unserialize_chararray(struct igbinary_unserialize_data *igsd, enum igbinary_type t, char **s, size_t *len TSRMLS_DC);
 
-inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval **z, int object TSRMLS_DC);
-inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval **z TSRMLS_DC);
-inline static int igbinary_unserialize_object_ser(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval **z, zend_class_entry *ce TSRMLS_DC);
-inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval **z TSRMLS_DC);
+inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, int flags TSRMLS_DC);
+inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, int flags TSRMLS_DC);
+inline static int igbinary_unserialize_object_ser(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, zend_class_entry *ce TSRMLS_DC);
+inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z TSRMLS_DC);
 
-static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zval **z TSRMLS_DC);
+static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zval *z, int flags TSRMLS_DC);
 /* }}} */
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_igbinary_serialize, 0, 0, 1)
@@ -425,7 +439,7 @@ IGBINARY_API int igbinary_serialize_ex(uint8_t **ret, size_t *ret_len, zval *z, 
 }
 /* }}} */
 /* {{{ int igbinary_unserialize(const uint8_t *, size_t, zval **) */
-IGBINARY_API int igbinary_unserialize(const uint8_t *buf, size_t buf_len, zval **z TSRMLS_DC) {
+IGBINARY_API int igbinary_unserialize(const uint8_t *buf, size_t buf_len, zval *z TSRMLS_DC) {
 	struct igbinary_unserialize_data igsd;
 
 	igbinary_unserialize_data_init(&igsd TSRMLS_CC);
@@ -438,7 +452,7 @@ IGBINARY_API int igbinary_unserialize(const uint8_t *buf, size_t buf_len, zval *
 		return 1;
 	}
 
-	if (igbinary_unserialize_zval(&igsd, z TSRMLS_CC)) {
+	if (igbinary_unserialize_zval(&igsd, z, WANT_CLEAR TSRMLS_CC)) {
 		igbinary_unserialize_data_deinit(&igsd TSRMLS_CC);
 		return 1;
 	}
@@ -450,12 +464,8 @@ IGBINARY_API int igbinary_unserialize(const uint8_t *buf, size_t buf_len, zval *
 /* }}} */
 /* {{{ proto string igbinary_unserialize(mixed value) */
 PHP_FUNCTION(igbinary_unserialize) {
-	char *string;
-	int string_len;
-
-	(void) return_value_ptr;
-	(void) this_ptr;
-	(void) return_value_used;
+	char *string = NULL;
+	size_t string_len;
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &string, &string_len) == FAILURE) {
 		RETURN_NULL();
@@ -465,7 +475,9 @@ PHP_FUNCTION(igbinary_unserialize) {
 		RETURN_FALSE;
 	}
 
-	if (igbinary_unserialize((uint8_t *) string, string_len, &return_value TSRMLS_CC) != 0) {
+	if (igbinary_unserialize((uint8_t *) string, string_len, return_value TSRMLS_CC) != 0) {
+		/* FIXME: is this a good place? a catch all */
+		zval_ptr_dtor(return_value);
 		RETURN_NULL();
 	}
 }
@@ -476,10 +488,6 @@ PHP_FUNCTION(igbinary_serialize) {
 	uint8_t *string;
 	size_t string_len;
 
-	(void) return_value_ptr;
-	(void) this_ptr;
-	(void) return_value_used;
-
 
 	if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z", &z) == FAILURE) {
 		RETURN_NULL();
@@ -489,7 +497,8 @@ PHP_FUNCTION(igbinary_serialize) {
 		RETURN_NULL();
 	}
 
-	RETVAL_STRINGL((char *)string, string_len, 0);
+	RETVAL_STRINGL((char *)string, string_len);
+	efree(string);
 }
 /* }}} */
 #ifdef HAVE_PHP_SESSION
@@ -565,7 +574,7 @@ PS_SERIALIZER_DECODE_FUNC(igbinary) {
 	}
 
 	ALLOC_INIT_ZVAL(z);
-	if (igbinary_unserialize_zval(&igsd, &z TSRMLS_CC)) {
+	if (igbinary_unserialize_zval(&igsd, &z, WANT_CLEAR TSRMLS_CC)) {
 		igbinary_unserialize_data_deinit(&igsd TSRMLS_CC);
 		zval_dtor(z);
 		FREE_ZVAL(z);
@@ -966,9 +975,9 @@ inline static int igbinary_serialize_array(struct igbinary_serialize_data *igsd,
 	HashTable *h;
 	HashPosition pos;
 	size_t n;
-	zval **d;
+	zval *d;
 
-	char *key;
+	zend_string *key;
 	uint key_len;
 	int key_type;
 	ulong key_index;
@@ -1019,51 +1028,44 @@ inline static int igbinary_serialize_array(struct igbinary_serialize_data *igsd,
 	}
 
 	/* serialize properties. */
-	zend_hash_internal_pointer_reset_ex(h, &pos);
-	for (;; zend_hash_move_forward_ex(h, &pos)) {
-		key_type = zend_hash_get_current_key_ex(h, &key, &key_len, &key_index, 0, &pos);
-
-		/* last */
-		if (key_type == HASH_KEY_NON_EXISTANT) {
-			break;
-		}
-
+	ZEND_HASH_FOREACH_KEY_VAL(h, key_index, key, d) {
 		/* skip magic member in incomplete classes */
-		if (incomplete_class && strcmp(key, MAGIC_MEMBER) == 0) {
+		if (incomplete_class && strcmp(ZSTR_VAL(key), MAGIC_MEMBER) == 0) {
 			continue;
 		}
 
-		switch (key_type) {
-			case HASH_KEY_IS_LONG:
-				if (igbinary_serialize_long(igsd, key_index TSRMLS_CC) != 0) {
-					return 1;
-				}
-				break;
-
-			case HASH_KEY_IS_STRING:
-				if (igbinary_serialize_string(igsd, key, key_len-1 TSRMLS_CC) != 0) {
-					return 1;
-				}
-				break;
-
-			default:
-				zend_error(E_ERROR, "igbinary_serialize_array: key is not string nor array");
-				/* not reached */
+		if (key == NULL) {
+			/* Key is numeric */
+			if (igbinary_serialize_long(igsd, key_index TSRMLS_CC) != 0) {
 				return 1;
+			}
+		} else {
+			/* Key is string */
+			if (igbinary_serialize_string(igsd, ZSTR_VAL(key), ZSTR_LEN(key) TSRMLS_CC) != 0) {
+				return 1;
+			}
 		}
 
+		if (d == NULL) {
+			php_error_docref(NULL TSRMLS_CC, E_NOTICE, "Received NULL value from hash.");
+			return 1;
+		}
+
+		if (Z_TYPE_P(d) == IS_INDIRECT) {
+			d = Z_INDIRECT_P(d);
+		}
 		/* we should still add element even if it's not OK,
 		 * since we already wrote the length of the array before */
-		if (zend_hash_get_current_data_ex(h, (void *) &d, &pos) != SUCCESS || d == NULL) {
+		if (Z_TYPE_P(d) == IS_UNDEF) {
 			if (igbinary_serialize_null(igsd TSRMLS_CC)) {
 				return 1;
 			}
 		} else {
-			if (igbinary_serialize_zval(igsd, *d TSRMLS_CC)) {
+			if (igbinary_serialize_zval(igsd, d TSRMLS_CC)) {
 				return 1;
 			}
 		}
-	}
+	} ZEND_HASH_FOREACH_END();
 
 	return 0;
 }
@@ -1073,19 +1075,26 @@ inline static int igbinary_serialize_array(struct igbinary_serialize_data *igsd,
 inline static int igbinary_serialize_array_ref(struct igbinary_serialize_data *igsd, zval *z, bool object TSRMLS_DC) {
 	uint32_t t = 0;
 	uint32_t *i = &t;
-	union {
-		zval *z;
-		struct {
-			zend_class_entry *ce;
-			zend_object_handle handle;
-		} obj;
-	} key = { 0 };
+	zend_value key = { 0 };
 
-	if (object && Z_TYPE_P(z) == IS_OBJECT && Z_OBJ_HT_P(z)->get_class_entry) {
-		key.obj.ce = Z_OBJCE_P(z);
-		key.obj.handle = Z_OBJ_HANDLE_P(z);
+	if (Z_TYPE_P(z) == IS_ARRAY) {
+		key = z->value;
+		return 1;
+	} else if (Z_REFCOUNTED_P(z)) {
+		key = z->value;
+	} else if (object && Z_TYPE_P(z) == IS_OBJECT) {
+		key.obj = Z_OBJ_P(z);
+	} else if (Z_TYPE_P(z) == IS_ARRAY) {
+		/* FIXME: should be default action? */
+		/* FIXME: could use Z_REFCOUNTED_P(z) ? */
+		/* Complex types and pointer backed numbers are safe because  */
+		/* they should remain unique. Longs and doubles as user given */
+		/* scalars are not, undef too. */
+		key = z->value;
 	} else {
-		key.z = z;
+		/* FIXME: in most cases a pointer to zval becomes useless in php 7 */
+		key.zv = z;
+		return 1;
 	}
 
 	if (hash_si_find(&igsd->objects, (char *)&key, sizeof(key), i) == 1) {
@@ -1132,12 +1141,13 @@ inline static int igbinary_serialize_array_ref(struct igbinary_serialize_data *i
 /* {{{ igbinary_serialize_array_sleep */
 /** Serializes object's properties array with __sleep -function. */
 inline static int igbinary_serialize_array_sleep(struct igbinary_serialize_data *igsd, zval *z, HashTable *h, zend_class_entry *ce, bool incomplete_class TSRMLS_DC) {
+	HashTable *object_properties;
 	HashPosition pos;
 	size_t n = zend_hash_num_elements(h);
-	zval **d;
-	zval **v;
+	zval *d;
+	zval *v;
 
-	char *key;
+	zend_string *key;
 	uint key_len;
 	int key_type;
 	ulong key_index;
@@ -1178,22 +1188,15 @@ inline static int igbinary_serialize_array_sleep(struct igbinary_serialize_data 
 		return 0;
 	}
 
-	zend_hash_internal_pointer_reset_ex(h, &pos);
+	object_properties = Z_OBJPROP_P(z);
 
-	for (;; zend_hash_move_forward_ex(h, &pos)) {
-		key_type = zend_hash_get_current_key_ex(h, &key, &key_len, &key_index, 0, &pos);
-
-		/* last */
-		if (key_type == HASH_KEY_NON_EXISTANT) {
-			break;
-		}
-
+	ZEND_HASH_FOREACH_KEY_VAL(h, key_index, key, d) {
 		/* skip magic member in incomplete classes */
-		if (incomplete_class && strcmp(key, MAGIC_MEMBER) == 0) {
+		if (incomplete_class && key != NULL && strcmp(ZSTR_VAL(key), MAGIC_MEMBER) == 0) {
 			continue;
 		}
 
-		if (zend_hash_get_current_data_ex(h, (void *) &d, &pos) != SUCCESS || d == NULL || Z_TYPE_PP(d) != IS_STRING) {
+		if (d == NULL || Z_TYPE_P(d) != IS_STRING) {
 			php_error_docref(NULL TSRMLS_CC, E_NOTICE, "__sleep should return an array only "
 					"containing the names of instance-variables to "
 					"serialize");
@@ -1205,78 +1208,86 @@ inline static int igbinary_serialize_array_sleep(struct igbinary_serialize_data 
 				return 1;
 			}
 		} else {
+			zend_string *prop_name = Z_STR_P(d);
 
-			if (zend_hash_find(Z_OBJPROP_P(z), Z_STRVAL_PP(d), Z_STRLEN_PP(d) + 1, (void *) &v) == SUCCESS) {
-				if (igbinary_serialize_string(igsd, Z_STRVAL_PP(d), Z_STRLEN_PP(d) TSRMLS_CC) != 0) {
+			if ((v = zend_hash_find(object_properties, prop_name)) != NULL) {
+				if (igbinary_serialize_string(igsd, ZSTR_VAL(prop_name), ZSTR_LEN(prop_name) TSRMLS_CC) != 0) {
 					return 1;
 				}
 
-				if (igbinary_serialize_zval(igsd, *v TSRMLS_CC) != 0) {
+				if (Z_TYPE_P(v) == IS_INDIRECT) {
+					v = Z_INDIRECT_P(v);
+				}
+				if (igbinary_serialize_zval(igsd, v TSRMLS_CC) != 0) {
 					return 1;
 				}
 			} else if (ce) {
-				char *prot_name = NULL;
-				char *priv_name = NULL;
-				int prop_name_length;
+				zend_string *mangled_prop_name;
+
+				v = NULL;
 
 				do {
 					/* try private */
-					zend_mangle_property_name(&priv_name, &prop_name_length, ce->name, ce->name_length,
-								Z_STRVAL_PP(d), Z_STRLEN_PP(d), ce->type & ZEND_INTERNAL_CLASS);
-					if (zend_hash_find(Z_OBJPROP_P(z), priv_name, prop_name_length+1, (void *) &v) == SUCCESS) {
-						if (igbinary_serialize_string(igsd, priv_name, prop_name_length TSRMLS_CC) != 0) {
-							efree(priv_name);
-							return 1;
-						}
-
-						efree(priv_name);
-						if (igbinary_serialize_zval(igsd, *v TSRMLS_CC) != 0) {
-							return 1;
-						}
-						break;
-					}
-					efree(priv_name);
+					mangled_prop_name = zend_mangle_property_name(ZSTR_VAL(ce->name), ZSTR_LEN(ce->name),
+						ZSTR_VAL(prop_name), ZSTR_LEN(prop_name), ce->type & ZEND_INTERNAL_CLASS);
+					v = zend_hash_find(object_properties, mangled_prop_name);
 
 					/* try protected */
-					zend_mangle_property_name(&prot_name, &prop_name_length, "*", 1,
-								Z_STRVAL_PP(d), Z_STRLEN_PP(d), ce->type & ZEND_INTERNAL_CLASS);
-					if (zend_hash_find(Z_OBJPROP_P(z), prot_name, prop_name_length+1, (void *) &v) == SUCCESS) {
-						if (igbinary_serialize_string(igsd, prot_name, prop_name_length TSRMLS_CC) != 0) {
-							efree(prot_name);
+					if (v == NULL) {
+						zend_string_release(mangled_prop_name);
+						mangled_prop_name = zend_mangle_property_name("*", 1,
+							ZSTR_VAL(prop_name), ZSTR_LEN(prop_name), ce->type & ZEND_INTERNAL_CLASS);
+
+						v = zend_hash_find(object_properties, mangled_prop_name);
+					}
+
+					/* Neither property exist */
+					if (v == NULL) {
+						zend_string_release(mangled_prop_name);
+
+						php_error_docref(NULL TSRMLS_CC, E_NOTICE, "\"%s\" returned as member variable from __sleep() but does not exist", Z_STRVAL_P(d));
+						if (igbinary_serialize_string(igsd, Z_STRVAL_P(d), Z_STRLEN_P(d) TSRMLS_CC) != 0) {
 							return 1;
 						}
 
-						efree(prot_name);
-						if (igbinary_serialize_zval(igsd, *v TSRMLS_CC) != 0) {
+						if (igbinary_serialize_null(igsd TSRMLS_CC) != 0) {
 							return 1;
 						}
+
 						break;
 					}
-					efree(prot_name);
 
-					/* no win */
-					php_error_docref(NULL TSRMLS_CC, E_NOTICE, "\"%s\" returned as member variable from __sleep() but does not exist", Z_STRVAL_PP(d));
-					if (igbinary_serialize_string(igsd, Z_STRVAL_PP(d), Z_STRLEN_PP(d) TSRMLS_CC) != 0) {
+					if (Z_TYPE_P(v) == IS_INDIRECT) {
+						v = Z_INDIRECT_P(v);
+					}
+
+					if (igbinary_serialize_string(igsd, ZSTR_VAL(mangled_prop_name), ZSTR_LEN(mangled_prop_name) TSRMLS_CC) != 0) {
+						zend_string_release(mangled_prop_name);
 						return 1;
 					}
 
-					if (igbinary_serialize_null(igsd TSRMLS_CC) != 0) {
+					zend_string_release(mangled_prop_name);
+					if (igbinary_serialize_zval(igsd, v TSRMLS_CC) != 0) {
 						return 1;
 					}
 				} while (0);
 
 			} else {
-				// if all else fails, just serialize the value in anyway.
-				if (igbinary_serialize_string(igsd, Z_STRVAL_PP(d), Z_STRLEN_PP(d) TSRMLS_CC) != 0) {
+				/* if all else fails, just serialize the value in anyway. */
+				if (igbinary_serialize_string(igsd, Z_STRVAL_P(d), Z_STRLEN_P(d) TSRMLS_CC) != 0) {
 					return 1;
 				}
 
-				if (igbinary_serialize_zval(igsd, *v TSRMLS_CC) != 0) {
+				if (Z_TYPE_P(v) == IS_INDIRECT) {
+					v = Z_INDIRECT_P(v);
+				}
+
+				if (igbinary_serialize_zval(igsd, v TSRMLS_CC) != 0) {
 					return 1;
 				}
 			}
 		}
-	}
+	} ZEND_HASH_FOREACH_END();
 
 	return 0;
 }
@@ -1360,17 +1371,18 @@ inline static int igbinary_serialize_object_name(struct igbinary_serialize_data 
  * @see ext/standard/var.c
  * */
 inline static int igbinary_serialize_object(struct igbinary_serialize_data *igsd, zval *z TSRMLS_DC) {
+	PHP_CLASS_ATTRIBUTES;
+
 	zend_class_entry *ce;
 
 	zval f;
-	zval *h = NULL;
+	zval h;
 
 	int r = 0;
 
 	unsigned char *serialized_data = NULL;
-	zend_uint serialized_len;
+	size_t serialized_len;
 
-	PHP_CLASS_ATTRIBUTES;
 
 	if (igbinary_serialize_array_ref(igsd, z, true TSRMLS_CC) == 0) {
 		return r;
@@ -1381,7 +1393,7 @@ inline static int igbinary_serialize_object(struct igbinary_serialize_data *igsd
 	/* custom serializer */
 	if (ce && ce->serialize != NULL) {
 		if (ce->serialize(z, &serialized_data, &serialized_len, (zend_serialize_data *)NULL TSRMLS_CC) == SUCCESS && !EG(exception)) {
-			if (igbinary_serialize_object_name(igsd, ce->name, ce->name_length TSRMLS_CC) != 0) {
+			if (igbinary_serialize_object_name(igsd, ZSTR_VAL(ce->name), ZSTR_LEN(ce->name) TSRMLS_CC) != 0) {
 				if (serialized_data) {
 					efree(serialized_data);
 				}
@@ -1460,36 +1472,39 @@ inline static int igbinary_serialize_object(struct igbinary_serialize_data *igsd
 
 	/* serialize class name */
 	PHP_SET_CLASS_ATTRIBUTES(z);
-	if (igbinary_serialize_object_name(igsd, class_name, name_len TSRMLS_CC) != 0) {
+	if (igbinary_serialize_object_name(igsd, ZSTR_VAL(class_name), ZSTR_LEN(class_name) TSRMLS_CC) != 0) {
 		PHP_CLEANUP_CLASS_ATTRIBUTES();
 		return 1;
 	}
 	PHP_CLEANUP_CLASS_ATTRIBUTES();
 
-	if (ce && ce != PHP_IC_ENTRY && zend_hash_exists(&ce->function_table, "__sleep", sizeof("__sleep"))) {
+	if (ce && ce != PHP_IC_ENTRY && zend_hash_str_exists(&ce->function_table, "__sleep", sizeof("__sleep") - 1)) {
 		/* function name string */
-		INIT_PZVAL(&f);
-		ZVAL_STRINGL(&f, "__sleep", sizeof("__sleep") - 1, 0);
+		ZVAL_STRINGL(&f, "__sleep", sizeof("__sleep") - 1);
 
+		ZVAL_UNDEF(&h);
 		/* calling z->__sleep */
-		r = call_user_function_ex(CG(function_table), &z, &f, &h, 0, 0, 1, NULL TSRMLS_CC);
+		r = call_user_function_ex(CG(function_table), z, &f, &h, 0, 0, 1, NULL TSRMLS_CC);
+
+		zval_dtor(&f);
 
 		if (r == SUCCESS && !EG(exception)) {
 			r = 0;
 
-			if (h) {
-				if (Z_TYPE_P(h) == IS_ARRAY) {
-					r = igbinary_serialize_array_sleep(igsd, z, HASH_OF(h), ce, incomplete_class TSRMLS_CC);
-				} else {
-					php_error_docref(NULL TSRMLS_CC, E_NOTICE, "__sleep should return an array only "
-							"containing the names of instance-variables to "
-							"serialize");
+			if (Z_TYPE(h) == IS_UNDEF) {
+				/* FIXME: is this ok? */
+				/* Valid, but skip */
+			} else if (HASH_OF(&h)) {
+				r = igbinary_serialize_array_sleep(igsd, z, HASH_OF(&h), ce, incomplete_class TSRMLS_CC);
+			} else {
+				php_error_docref(NULL TSRMLS_CC, E_NOTICE, "__sleep should return an array only "
+						"containing the names of instance-variables to "
+						"serialize");
 
-					/* empty array */
-					r = igbinary_serialize8(igsd, igbinary_type_array8 TSRMLS_CC);
-					if (r == 0) {
-						r = igbinary_serialize8(igsd, 0 TSRMLS_CC);
-					}
+				/* empty array */
+				r = igbinary_serialize8(igsd, igbinary_type_array8 TSRMLS_CC);
+				if (r == 0) {
+					r = igbinary_serialize8(igsd, 0 TSRMLS_CC);
 				}
 			}
 		} else {
@@ -1497,9 +1512,7 @@ inline static int igbinary_serialize_object(struct igbinary_serialize_data *igsd
 		}
 
 		/* cleanup */
-		if (h) {
-			zval_ptr_dtor(&h);
-		}
+		zval_ptr_dtor(&h);
 
 		return r;
 	} else {
@@ -1517,19 +1530,10 @@ static int igbinary_serialize_zval(struct igbinary_serialize_data *igsd, zval *z
 
 		/* Complex types serialize a reference, scalars do not... */
 		/* FIXME: Absolutely wrong level to check this. */
-		switch (Z_TYPE_P(z)) {
-			case IS_RESOURCE:
-			case IS_STRING:
-			case IS_LONG:
-			case IS_NULL:
-			case IS_BOOL:
-			case IS_DOUBLE:
-				/* Serialize a reference if zval already added */
-				if (igbinary_serialize_array_ref(igsd, z, false TSRMLS_CC) == 0) {
-					return 0;
-				}
-				/* otherwise fall through */
+		if (igbinary_serialize_array_ref(igsd, z, false TSRMLS_CC) == 0) {
+			return 0;
 		}
+		ZVAL_DEREF(z);
 	}
 	switch (Z_TYPE_P(z)) {
 		case IS_RESOURCE:
@@ -1544,8 +1548,10 @@ static int igbinary_serialize_zval(struct igbinary_serialize_data *igsd, zval *z
 			return igbinary_serialize_long(igsd, Z_LVAL_P(z) TSRMLS_CC);
 		case IS_NULL:
 			return igbinary_serialize_null(igsd TSRMLS_CC);
-		case IS_BOOL:
-			return igbinary_serialize_bool(igsd, Z_LVAL_P(z) ? 1 : 0 TSRMLS_CC);
+		case IS_TRUE:
+			return igbinary_serialize_bool(igsd, 1 TSRMLS_CC);
+		case IS_FALSE:
+			return igbinary_serialize_bool(igsd, 0 TSRMLS_CC);
 		case IS_DOUBLE:
 			return igbinary_serialize_double(igsd, Z_DVAL_P(z) TSRMLS_CC);
 		default:
@@ -1560,7 +1566,7 @@ static int igbinary_serialize_zval(struct igbinary_serialize_data *igsd, zval *z
 /* {{{ igbinary_unserialize_data_init */
 /** Inits igbinary_unserialize_data_init. */
 inline static int igbinary_unserialize_data_init(struct igbinary_unserialize_data *igsd TSRMLS_DC) {
-	smart_str empty_str = { 0 };
+	smart_string empty_str = { 0 };
 
 	igsd->buffer = NULL;
 	igsd->buffer_size = 0;
@@ -1576,7 +1582,7 @@ inline static int igbinary_unserialize_data_init(struct igbinary_unserialize_dat
 	igsd->references_count = 0;
 	igsd->references_capacity = 4;
 
-	igsd->references = (void **) emalloc(sizeof(void *) * igsd->references_capacity);
+	igsd->references = emalloc(sizeof(igsd->references[0]) * igsd->references_capacity);
 	if (igsd->references == NULL) {
 		return 1;
 	}
@@ -1586,6 +1592,7 @@ inline static int igbinary_unserialize_data_init(struct igbinary_unserialize_dat
 		efree(igsd->references);
 		return 1;
 	}
+
 
 	return 0;
 }
@@ -1601,7 +1608,7 @@ inline static void igbinary_unserialize_data_deinit(struct igbinary_unserialize_
 		efree(igsd->references);
 	}
 
-	smart_str_free(&igsd->string0_buf);
+	smart_string_free(&igsd->string0_buf);
 
 	return;
 }
@@ -1869,12 +1876,12 @@ inline static int igbinary_unserialize_chararray(struct igbinary_unserialize_dat
 /* }}} */
 /* {{{ igbinary_unserialize_array */
 /** Unserializes array. */
-inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval **z, int object TSRMLS_DC) {
+inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, int flags TSRMLS_DC) {
 	size_t n;
 	size_t i;
 
-	zval *v = NULL;
-	/*	zval *old_v; */
+	zval v;
+	zval *vp;
 
 	char *key;
 	size_t key_len = 0;
@@ -1907,29 +1914,32 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 		return 1;
 	}
 
-	// n cannot be larger than the number of minimum "objects" in the array
+	/* n cannot be larger than the number of minimum "objects" in the array */
 	if (n > igsd->buffer_size - igsd->buffer_offset) {
 		zend_error(E_WARNING, "%s: data size %zu smaller that requested array length %zu.", "igbinary_unserialize_array", igsd->buffer_size - igsd->buffer_offset, n);
 		return 1;
 	}
 
-	if (!object) {
-		Z_TYPE_PP(z) = IS_ARRAY;
-		ALLOC_HASHTABLE(Z_ARRVAL_PP(z));
-		zend_hash_init(Z_ARRVAL_PP(z), n + 1, NULL, ZVAL_PTR_DTOR, 0);
+	if ((flags & WANT_OBJECT) == 0) {
+		array_init_size(z, n + 1);
 
-		/* references */
-		if (igsd->references_count + 1 >= igsd->references_capacity) {
-			while (igsd->references_count + 1 >= igsd->references_capacity) {
-				igsd->references_capacity *= 2;
+		if (flags & WANT_REF) {
+			/* references */
+			if (igsd->references_count + 1 >= igsd->references_capacity) {
+				while (igsd->references_count + 1 >= igsd->references_capacity) {
+					igsd->references_capacity *= 2;
+				}
+
+				igsd->references = erealloc(igsd->references, sizeof(igsd->references[0]) * igsd->references_capacity);
+				if (igsd->references == NULL)
+					return 1;
 			}
 
-			igsd->references = (void **) erealloc(igsd->references, sizeof(void *) * igsd->references_capacity);
-			if (igsd->references == NULL)
-				return 1;
+			/*ZVAL_COPY_VALUE(IGB_REF_VAL(igsd, igsd->references_count++), z);*/
+			IGB_REF_VAL(igsd, igsd->references_count++) = z;
+			ZVAL_MAKE_REF(z);
+			ZVAL_DEREF(z);
 		}
-
-		igsd->references[igsd->references_count++] = (void *) *z;
 	}
 
 	/* empty array */
@@ -1937,15 +1947,15 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 		return 0;
 	}
 
-	h = HASH_OF(*z);
+	h = HASH_OF(z);
 
 	for (i = 0; i < n; i++) {
 		key = NULL;
 
 		if (igsd->buffer_offset + 1 > igsd->buffer_size) {
 			zend_error(E_WARNING, "igbinary_unserialize_array: end-of-data");
-			zval_dtor(*z);
-			ZVAL_NULL(*z);
+			zval_dtor(z);
+			ZVAL_NULL(z);
 			return 1;
 		}
 
@@ -1961,8 +1971,8 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 			case igbinary_type_long64p:
 			case igbinary_type_long64n:
 				if (igbinary_unserialize_long(igsd, key_type, &key_index TSRMLS_CC)) {
-					zval_dtor(*z);
-					ZVAL_NULL(*z);
+					zval_dtor(z);
+					ZVAL_UNDEF(z);
 					return 1;
 				}
 				break;
@@ -1970,8 +1980,8 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 			case igbinary_type_string_id16:
 			case igbinary_type_string_id32:
 				if (igbinary_unserialize_string(igsd, key_type, &key, &key_len TSRMLS_CC)) {
-					zval_dtor(*z);
-					ZVAL_NULL(*z);
+					zval_dtor(z);
+					ZVAL_UNDEF(z);
 					return 1;
 				}
 				break;
@@ -1979,8 +1989,8 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 			case igbinary_type_string16:
 			case igbinary_type_string32:
 				if (igbinary_unserialize_chararray(igsd, key_type, &key, &key_len TSRMLS_CC)) {
-					zval_dtor(*z);
-					ZVAL_NULL(*z);
+					zval_dtor(z);
+					ZVAL_UNDEF(z);
 					return 1;
 				}
 				break;
@@ -1992,39 +2002,49 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 				continue;
 			default:
 				zend_error(E_WARNING, "igbinary_unserialize_array: unknown key type '%02x', position %zu", key_type, igsd->buffer_offset);
-				zval_dtor(*z);
-				ZVAL_NULL(*z);
+				zval_dtor(z);
+				ZVAL_UNDEF(z);
 				return 1;
 		}
 
 
-		ALLOC_INIT_ZVAL(v);
-		if (igbinary_unserialize_zval(igsd, &v TSRMLS_CC)) {
-			zval_dtor(*z);
-			ZVAL_NULL(*z);
-			zval_ptr_dtor(&v);
-			return 1;
+		/* first add key into array so refereces can properly and not stack allocated zvals */
+		/* Use NULL because inserting UNDEf into array does not add a new element */
+		ZVAL_NULL(&v);
+		if (key) {
+			zend_string *key_str = zend_string_init(key, key_len, 0);
+
+			if ((flags & WANT_OBJECT) != 0) {
+				zval *prototype_value = zend_hash_find(h, key_str);
+				if (prototype_value != NULL) {
+					if (Z_TYPE_P(prototype_value) == IS_INDIRECT) {
+						prototype_value = Z_INDIRECT_P(prototype_value);
+					}
+					zval_ptr_dtor(prototype_value);
+				}
+
+				zend_hash_update_ind(h, key_str, &v);
+			} else {
+				zend_hash_update(h, key_str, &v);
+			}
+
+			vp = zend_hash_find(h, key_str);
+			zend_string_release(key_str);
+		} else {
+			zend_hash_index_update(h, key_index, &v);
+			vp = zend_hash_index_find(h, key_index);
 		}
 
-		if (key) {
-			/* Keys must include a terminating null. */
-			/* Ensure buffer starts at the beginning. */
-			igsd->string0_buf.len = 0;
-			smart_str_appendl(&igsd->string0_buf, key, key_len);
-			smart_str_0(&igsd->string0_buf);
-/*
-			if (zend_symtable_find(h, key, key_len + 1, (void **)&old_v) == SUCCESS) {
-				var_push_dtor(var_hash, old_v);
-			}
-*/
-			zend_symtable_update(h, igsd->string0_buf.c, igsd->string0_buf.len + 1, &v, sizeof(v), NULL);
-		} else {
-/*
-			if (zend_hash_index_find(h, key_index, (void **)&old_v) == SUCCESS) {
-				var_push_dtor(var_hash, old_v);
-			}
-*/
-			zend_hash_index_update(h, key_index, &v, sizeof(v), NULL);
+		ZEND_ASSERT(vp != NULL);
+		if (Z_TYPE_P(vp) == IS_INDIRECT) {
+			vp = Z_INDIRECT_P(vp);
+		}
+
+		ZEND_ASSERT(vp != NULL);
+		if (igbinary_unserialize_zval(igsd, vp, WANT_CLEAR TSRMLS_CC)) {
+			/* zval_ptr_dtor(z); */
+			/* zval_ptr_dtor(vp); */
+			return 1;
 		}
 	}
 
@@ -2033,7 +2053,7 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 /* }}} */
 /* {{{ igbinary_unserialize_object_ser */
 /** Unserializes object's property array of objects implementing Serializable -interface. */
-inline static int igbinary_unserialize_object_ser(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval **z, zend_class_entry *ce TSRMLS_DC) {
+inline static int igbinary_unserialize_object_ser(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, zend_class_entry *ce TSRMLS_DC) {
 	size_t n;
 	int ret;
 	php_unserialize_data_t var_hash;
@@ -2090,13 +2110,15 @@ inline static int igbinary_unserialize_object_ser(struct igbinary_unserialize_da
 /** Unserialize object.
  * @see ext/standard/var_unserializer.c
  */
-inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval **z TSRMLS_DC) {
+inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, int flags TSRMLS_DC) {
 	zend_class_entry *ce;
 	zend_class_entry **pce;
 
-	zval *h = NULL;
+	zval h;
 	zval f;
+	size_t ref_n;
 
+	zend_string *class_name;
 	char *name = NULL;
 	size_t name_len = 0;
 
@@ -2104,10 +2126,9 @@ inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *
 
 	bool incomplete_class = false;
 
-	zval *user_func;
-	zval *retval_ptr;
-	zval **args[1];
-	zval *arg_func_name;
+	zval user_func;
+	zval retval;
+	zval args[1];
 
 	if (t == igbinary_type_object8 || t == igbinary_type_object16 || t == igbinary_type_object32) {
 		if (igbinary_unserialize_chararray(igsd, t, &name, &name_len TSRMLS_CC)) {
@@ -2122,10 +2143,12 @@ inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *
 		return 1;
 	}
 
+	class_name = zend_string_init(name, name_len, 0);
+
 	do {
 		/* Try to find class directly */
-		if (zend_lookup_class(name, name_len, &pce TSRMLS_CC) == SUCCESS) {
-			ce = *pce;
+		if (ce = zend_lookup_class(class_name TSRMLS_CC)) {
+			/* FIXME: lookup class may cause exception in load callback */
 			break;
 		}
 
@@ -2137,42 +2160,42 @@ inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *
 		}
 
 		/* Call unserialize callback */
-		MAKE_STD_ZVAL(user_func);
-		ZVAL_STRING(user_func, PG(unserialize_callback_func), 1);
-		args[0] = &arg_func_name;
-		MAKE_STD_ZVAL(arg_func_name);
-		ZVAL_STRING(arg_func_name, name, 1);
-		if (call_user_function_ex(CG(function_table), NULL, user_func, &retval_ptr, 1, args, 0, NULL TSRMLS_CC) != SUCCESS) {
+		ZVAL_STRING(&user_func, PG(unserialize_callback_func));
+		/* FIXME: Do we need a str copy? */
+		/* FIXME: Release arg[0] */
+		/* FIXME: Release class_name */
+		ZVAL_STR_COPY(&args[0], class_name);
+		if (call_user_function_ex(CG(function_table), NULL, &user_func, &retval, 1, args, 0, NULL TSRMLS_CC) != SUCCESS) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "defined (%s) but not found", name);
 			incomplete_class = 1;
 			ce = PHP_IC_ENTRY;
+			zval_ptr_dtor(&args[0]);
 			zval_ptr_dtor(&user_func);
-			zval_ptr_dtor(&arg_func_name);
 			break;
 		}
-		if (retval_ptr) {
-			zval_ptr_dtor(&retval_ptr);
-		}
+		/* FIXME: always safe? */
+		zval_ptr_dtor(&retval);
 
 		/* The callback function may have defined the class */
-		if (zend_lookup_class(name, name_len, &pce TSRMLS_CC) == SUCCESS) {
-			ce = *pce;
-		} else {
+		ce = zend_lookup_class(class_name TSRMLS_CC);
+		if (!ce) {
 			php_error_docref(NULL TSRMLS_CC, E_WARNING, "Function %s() hasn't defined the class it was called for", name);
 			incomplete_class = true;
 			ce = PHP_IC_ENTRY;
 		}
 
+		zval_ptr_dtor(&args[0]);
 		zval_ptr_dtor(&user_func);
-		zval_ptr_dtor(&arg_func_name);
 	} while (0);
+
+	zend_string_release(class_name);
+	class_name = NULL;
 
 	/* previous user function call may have raised an exception */
 	if (EG(exception)) {
 		return 1;
 	}
 
-	object_init_ex(*z, ce);
 
 	/* reference */
 	if (igsd->references_count + 1 >= igsd->references_capacity) {
@@ -2180,59 +2203,62 @@ inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *
 			igsd->references_capacity *= 2;
 		}
 
-		igsd->references = (void **) erealloc(igsd->references, sizeof(void *) * igsd->references_capacity);
+		igsd->references = erealloc(igsd->references, sizeof(igsd->references[0]) * igsd->references_capacity);
 		if (igsd->references == NULL)
 			return 1;
 	}
 
-	igsd->references[igsd->references_count++] = (void *) *z;
-
-	/* store incomplete class name */
-	if (incomplete_class) {
-		php_store_class_name(*z, name, name_len);
-	}
+	ref_n = igsd->references_count++;
+	/*ZVAL_UNDEF(IGB_REF_VAL(igsd, ref_n));*/
+	IGB_REF_VAL(igsd, ref_n) = z;
 
 	t = (enum igbinary_type) igbinary_unserialize8(igsd TSRMLS_CC);
 	switch (t) {
 		case igbinary_type_array8:
 		case igbinary_type_array16:
 		case igbinary_type_array32:
-			r = igbinary_unserialize_array(igsd, t, z, 1 TSRMLS_CC);
+			object_init_ex(IGB_REF_VAL(igsd, ref_n), ce);
+			if (incomplete_class) {
+				php_store_class_name(IGB_REF_VAL(igsd, ref_n), name, name_len);
+			}
+			r = igbinary_unserialize_array(igsd, t, IGB_REF_VAL(igsd, ref_n), WANT_OBJECT TSRMLS_CC);
 			break;
 		case igbinary_type_object_ser8:
 		case igbinary_type_object_ser16:
 		case igbinary_type_object_ser32:
-			r = igbinary_unserialize_object_ser(igsd, t, z, ce TSRMLS_CC);
+			r = igbinary_unserialize_object_ser(igsd, t, IGB_REF_VAL(igsd, ref_n), ce TSRMLS_CC);
+			if (r == 0 && incomplete_class) {
+				php_store_class_name(IGB_REF_VAL(igsd, ref_n), name, name_len);
+			}
 			break;
 		default:
 			zend_error(E_WARNING, "igbinary_unserialize_object: unknown object inner type '%02x', position %zu", t, igsd->buffer_offset);
-			return 1;
+			r = 1;
 	}
 
-	if (r) {
-		return r;
-	}
+	if (r == 0 &&
+		Z_OBJCE_P(IGB_REF_VAL(igsd, ref_n)) != PHP_IC_ENTRY &&
+		zend_hash_str_exists(&Z_OBJCE_P(IGB_REF_VAL(igsd, ref_n))->function_table, "__wakeup", sizeof("__wakeup") - 1)) {
+		ZVAL_UNDEF(&h);
+		ZVAL_STRINGL(&f, "__wakeup", sizeof("__wakeup") - 1);
+		call_user_function_ex(CG(function_table), IGB_REF_VAL(igsd, ref_n), &f, &h, 0, 0, 1, NULL TSRMLS_CC);
 
-	if (Z_OBJCE_PP(z) != PHP_IC_ENTRY && zend_hash_exists(&Z_OBJCE_PP(z)->function_table, "__wakeup", sizeof("__wakeup"))) {
-		INIT_PZVAL(&f);
-		ZVAL_STRINGL(&f, "__wakeup", sizeof("__wakeup") - 1, 0);
-		call_user_function_ex(CG(function_table), z, &f, &h, 0, 0, 1, NULL TSRMLS_CC);
-
-		if (h) {
-			zval_ptr_dtor(&h);
-		}
+		zval_dtor(&f);
+		zval_ptr_dtor(&h);
 
 		if (EG(exception)) {
 			r = 1;
 		}
 	}
 
+	/* ZVAL_COPY_VALUE(z, IGB_REF_VAL(igsd, ref_n)); */
+
 	return r;
 }
 /* }}} */
 /* {{{ igbinary_unserialize_ref */
 /** Unserializes array or object by reference. */
-inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval **z TSRMLS_DC) {
+inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z TSRMLS_DC) {
 	size_t n;
 
 	if (t == igbinary_type_ref8 || t == igbinary_type_objref8) {
@@ -2263,15 +2289,17 @@ inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igs
 		return 1;
 	}
 
-	if (*z != NULL) {
+	if (z != NULL) {
+		/* FIXME: check with is refcountable or some such */
 		zval_ptr_dtor(z);
+		ZVAL_UNDEF(z);
 	}
 
-	*z = igsd->references[n];
-	Z_ADDREF_PP(z);
-
+	ZVAL_COPY(z, IGB_REF_VAL(igsd, n));
 	if (t == igbinary_type_objref8 || t == igbinary_type_objref16 || t == igbinary_type_objref32) {
-	Z_SET_ISREF_TO_PP(z, false);
+		/* FIXME: clear/set ref.. */
+		/*Z_SET_ISREF_TO_P(z, false);*/
+		/*ZVAL_MAKE_REF(z);*/
 	}
 
 	return 0;
@@ -2279,13 +2307,15 @@ inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igs
 /* }}} */
 /* {{{ igbinary_unserialize_zval */
 /** Unserialize zval. */
-static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zval **z TSRMLS_DC) {
+static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zval *z, int flags TSRMLS_DC) {
 	enum igbinary_type t;
 
 	long tmp_long;
 	double tmp_double;
 	char *tmp_chararray;
+	zval *zp;
 	size_t tmp_size_t;
+	size_t ref_n;
 
 	if (igsd->buffer_offset + 1 > igsd->buffer_size) {
 		zend_error(E_WARNING, "igbinary_unserialize_zval: end-of-data");
@@ -2296,32 +2326,31 @@ static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zva
 
 	switch (t) {
 		case igbinary_type_ref:
-			if (igbinary_unserialize_zval(igsd, z TSRMLS_CC)) {
+			if (igbinary_unserialize_zval(igsd, z, WANT_REF TSRMLS_CC)) {
 				return 1;
 			}
-			/* Scalar types should be added to the references hash */
-			/* unless they're already added */
-			/* in references list: marked as ref */
-			if (!Z_ISREF_PP(z)) switch (Z_TYPE_PP(z)) {
-				case IS_STRING:
-				case IS_LONG:
-				case IS_NULL:
-				case IS_DOUBLE:
-				case IS_BOOL:
-					/* reference */
-					if (igsd->references_count + 1 >= igsd->references_capacity) {
-						while (igsd->references_count + 1 >= igsd->references_capacity) {
-							igsd->references_capacity *= 2;
-						}
 
-						igsd->references = (void **) erealloc(igsd->references, sizeof(void *) * igsd->references_capacity);
-						if (igsd->references == NULL)
-							return 1;
-					}
-
-					igsd->references[igsd->references_count++] = (void *) *z;
+			if (Z_ISREF_P(z)) {
+				break;
 			}
-			Z_SET_ISREF_TO_PP(z, true);
+
+
+			/* reference */
+			if (igsd->references_count + 1 >= igsd->references_capacity) {
+				while (igsd->references_count + 1 >= igsd->references_capacity) {
+					igsd->references_capacity *= 2;
+				}
+
+				igsd->references = erealloc(igsd->references, sizeof(igsd->references[0]) * igsd->references_capacity);
+				if (igsd->references == NULL)
+					return 1;
+			}
+			ref_n = igsd->references_count++;
+
+
+			ZVAL_MAKE_REF(z);
+			IGB_REF_VAL(igsd, ref_n) = z;
+			/*ZVAL_COPY_VALUE(IGB_REF_VAL(igsd, ref_n), z);*/
 			break;
 		case igbinary_type_objref8:
 		case igbinary_type_objref16:
@@ -2339,19 +2368,19 @@ static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zva
 		case igbinary_type_object_id8:
 		case igbinary_type_object_id16:
 		case igbinary_type_object_id32:
-			if (igbinary_unserialize_object(igsd, t, z TSRMLS_CC)) {
+			if (igbinary_unserialize_object(igsd, t, z, flags TSRMLS_CC)) {
 				return 1;
 			}
 			break;
 		case igbinary_type_array8:
 		case igbinary_type_array16:
 		case igbinary_type_array32:
-			if (igbinary_unserialize_array(igsd, t, z, 0 TSRMLS_CC)) {
+			if (igbinary_unserialize_array(igsd, t, z, flags TSRMLS_CC)) {
 				return 1;
 			}
 			break;
 		case igbinary_type_string_empty:
-			ZVAL_EMPTY_STRING(*z);
+			ZVAL_EMPTY_STRING(z);
 			break;
 		case igbinary_type_string_id8:
 		case igbinary_type_string_id16:
@@ -2359,7 +2388,7 @@ static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zva
 			if (igbinary_unserialize_string(igsd, t, &tmp_chararray, &tmp_size_t TSRMLS_CC)) {
 				return 1;
 			}
-			ZVAL_STRINGL(*z, tmp_chararray, tmp_size_t, 1);
+			ZVAL_STRINGL(z, tmp_chararray, tmp_size_t);
 			break;
 		case igbinary_type_string8:
 		case igbinary_type_string16:
@@ -2367,7 +2396,7 @@ static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zva
 			if (igbinary_unserialize_chararray(igsd, t, &tmp_chararray, &tmp_size_t TSRMLS_CC)) {
 				return 1;
 			}
-			ZVAL_STRINGL(*z, tmp_chararray, tmp_size_t, 1);
+			ZVAL_STRINGL(z, tmp_chararray, tmp_size_t);
 			break;
 		case igbinary_type_long8p:
 		case igbinary_type_long8n:
@@ -2380,22 +2409,22 @@ static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zva
 			if (igbinary_unserialize_long(igsd, t, &tmp_long TSRMLS_CC)) {
 				return 1;
 			}
-			ZVAL_LONG(*z, tmp_long);
+			ZVAL_LONG(z, tmp_long);
 			break;
 		case igbinary_type_null:
-			ZVAL_NULL(*z);
+			ZVAL_NULL(z);
 			break;
 		case igbinary_type_bool_false:
-			ZVAL_BOOL(*z, 0);
+			ZVAL_BOOL(z, 0);
 			break;
 		case igbinary_type_bool_true:
-			ZVAL_BOOL(*z, 1);
+			ZVAL_BOOL(z, 1);
 			break;
 		case igbinary_type_double:
 			if (igbinary_unserialize_double(igsd, t, &tmp_double TSRMLS_CC)) {
 				return 1;
 			}
-			ZVAL_DOUBLE(*z, tmp_double);
+			ZVAL_DOUBLE(z, tmp_double);
 			break;
 		default:
 			zend_error(E_WARNING, "igbinary_unserialize_zval: unknown type '%02x', position %zu", t, igsd->buffer_offset);

@@ -1,7 +1,5 @@
 --TEST--
 Check for reference serialisation
---INI--
-report_memleaks=0
 --SKIPIF--
 <?php
 if(!extension_loaded('igbinary')) {
@@ -18,8 +16,13 @@ function test($type, $variable, $test = true) {
 	echo substr(bin2hex($serialized), 8), "\n";
 	echo !$test || $unserialized == $variable ? 'OK' : 'ERROR', "\n";
 
-	$dump_exp = print_r($variable, true);
-	$dump_act = print_r($unserialized, true);
+	ob_start();
+	var_dump($variable);
+	$dump_exp = ob_get_clean();
+	ob_start();
+	var_dump($unserialized);
+	$dump_act = ob_get_clean();
+
 
 	if ($dump_act !== $dump_exp) {
 		echo "But var dump differs:\n", $dump_act, "\n", $dump_exp, "\n";

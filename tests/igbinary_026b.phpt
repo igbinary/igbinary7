@@ -28,8 +28,12 @@ $b = array(1, 2, $a);
 $k = igbinary_unserialize(igbinary_serialize($a));
 
 function check($a, $k) {
-	$a_str = print_r($a, true);
-	$k_str = print_r($k, true);
+	ob_start();
+	var_dump($a);
+	$a_str = ob_get_clean();
+	ob_start();
+	var_dump($k);
+	$k_str = ob_get_clean();
 
 	if ($a_str !== $k_str) {
 		echo "Output differs\n";
