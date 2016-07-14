@@ -2262,15 +2262,21 @@ inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *
 			if (incomplete_class) {
 				php_store_class_name(IGB_REF_VAL(igsd, ref_n), name, name_len);
 			}
-			r = igbinary_unserialize_array(igsd, t, IGB_REF_VAL(igsd, ref_n), WANT_OBJECT TSRMLS_CC);
+			r = igbinary_unserialize_array(igsd, t, IGB_REF_VAL(igsd, ref_n), flags|WANT_OBJECT TSRMLS_CC);
 			break;
 		case igbinary_type_object_ser8:
 		case igbinary_type_object_ser16:
 		case igbinary_type_object_ser32:
 
 			r = igbinary_unserialize_object_ser(igsd, t, IGB_REF_VAL(igsd, ref_n), ce TSRMLS_CC);
-			if (r == 0 && incomplete_class) {
+            if (r != 0) {
+                break;
+            }
+			if (incomplete_class) {
 				php_store_class_name(IGB_REF_VAL(igsd, ref_n), name, name_len);
+			}
+			if ((flags & WANT_REF) != 0) {
+				ZVAL_MAKE_REF(z);
 			}
 			break;
 		default:
@@ -2278,12 +2284,12 @@ inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *
 			r = 1;
 	}
 
-/* If unserialize was successful, call __wakeup if __wakeup exists for this object. */
+	/* If unserialize was successful, call __wakeup if __wakeup exists for this object. */
 	if (r == 0) {
 		zval *ztemp = IGB_REF_VAL(igsd, ref_n);
 		zend_class_entry *ztemp_ce;
-        /* May have created a reference while deserializing an object, if it was recursive. */
-        ZVAL_DEREF(ztemp);
+		/* May have created a reference while deserializing an object, if it was recursive. */
+		ZVAL_DEREF(ztemp);
 		if (Z_TYPE_P(ztemp) != IS_OBJECT) {
 			zend_error(E_WARNING, "igbinary_unserialize_object preparing to __wakeup: created non-object somehow?", t, igsd->buffer_offset);
 			return 1;
@@ -2293,7 +2299,7 @@ inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *
 			zend_hash_str_exists(&ztemp_ce->function_table, "__wakeup", sizeof("__wakeup") - 1)) {
 			ZVAL_UNDEF(&h);
 			ZVAL_STRINGL(&f, "__wakeup", sizeof("__wakeup") - 1);
-			call_user_function_ex(CG(function_table), IGB_REF_VAL(igsd, ref_n), &f, &h, 0, 0, 1, NULL TSRMLS_CC);
+			call_user_function_ex(CG(function_table), ztemp, &f, &h, 0, 0, 1, NULL TSRMLS_CC);
 
 			zval_dtor(&f);
 			zval_ptr_dtor(&h);
@@ -2444,7 +2450,7 @@ static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zva
 		case igbinary_type_array8:
 		case igbinary_type_array16:
 		case igbinary_type_array32:
-			if (igbinary_unserialize_array(igsd, t, z, flags & (~WANT_OBJECT) TSRMLS_CC)) {
+			if (igbinary_unserialize_array(igsd, t, z, flags TSRMLS_CC)) {
 				return 1;
 			}
 			break;
