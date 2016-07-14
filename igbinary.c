@@ -228,12 +228,12 @@ inline static int igbinary_unserialize_double(struct igbinary_unserialize_data *
 inline static int igbinary_unserialize_string(struct igbinary_unserialize_data *igsd, enum igbinary_type t, char **s, size_t *len TSRMLS_DC);
 inline static int igbinary_unserialize_chararray(struct igbinary_unserialize_data *igsd, enum igbinary_type t, char **s, size_t *len TSRMLS_DC);
 
-inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, int flags TSRMLS_DC);
-inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, int flags TSRMLS_DC);
-inline static int igbinary_unserialize_object_ser(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, zend_class_entry *ce TSRMLS_DC);
-inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, int flags TSRMLS_DC);
+inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *const z, int flags TSRMLS_DC);
+inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *const z, int flags TSRMLS_DC);
+inline static int igbinary_unserialize_object_ser(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *const z, zend_class_entry *ce TSRMLS_DC);
+inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *const z, int flags TSRMLS_DC);
 
-static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zval *z, int flags TSRMLS_DC);
+static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zval *const z, int flags TSRMLS_DC);
 /* }}} */
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_igbinary_serialize, 0, 0, 1)
@@ -1927,7 +1927,7 @@ inline static int igbinary_unserialize_chararray(struct igbinary_unserialize_dat
 /* }}} */
 /* {{{ igbinary_unserialize_array */
 /** Unserializes array. */
-inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, int flags TSRMLS_DC) {
+inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *const z, int flags TSRMLS_DC) {
 	/* WANT_OBJECT means that z will be an object (if dereferenced) */
 	/* WANT_REF means that z will be wrapped by an IS_REFERENCE */
 	size_t n;
@@ -1974,18 +1974,18 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 		return 1;
 	}
 
-	if ((flags & WANT_OBJECT) == 0) {
-		array_init_size(z, n + 1);
-		/* add the new array to the list of unserialized references */
-		if (igsd_append_ref(igsd, z) == SIZE_MAX) {
-			return 1;
-		}
-	}
 	z_deref = z;
 	if (flags & WANT_REF) {
 		if (!Z_ISREF_P(z)) {
 			ZVAL_NEW_REF(z, z);
 			z_deref = Z_REFVAL_P(z);
+		}
+	}
+	if ((flags & WANT_OBJECT) == 0) {
+		array_init_size(z_deref, n + 1);
+		/* add the new array to the list of unserialized references */
+		if (igsd_append_ref(igsd, z) == SIZE_MAX) {
+			return 1;
 		}
 	}
 
@@ -2100,7 +2100,7 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 /* }}} */
 /* {{{ igbinary_unserialize_object_ser */
 /** Unserializes object's property array of objects implementing Serializable -interface. */
-inline static int igbinary_unserialize_object_ser(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, zend_class_entry *ce TSRMLS_DC) {
+inline static int igbinary_unserialize_object_ser(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *const z, zend_class_entry *ce TSRMLS_DC) {
 	size_t n;
 	int ret;
 	php_unserialize_data_t var_hash;
@@ -2157,7 +2157,7 @@ inline static int igbinary_unserialize_object_ser(struct igbinary_unserialize_da
 /** Unserialize object.
  * @see ext/standard/var_unserializer.c
  */
-inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, int flags TSRMLS_DC) {
+inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *const z, int flags TSRMLS_DC) {
 	zend_class_entry *ce;
 
 	zval h;
@@ -2282,9 +2282,8 @@ inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *
 	if (r == 0) {
 		zval *ztemp = IGB_REF_VAL(igsd, ref_n);
 		zend_class_entry *ztemp_ce;
-		if (Z_ISREF_P(ztemp)) {  /* May have created a reference while deserializing an object, if it was recursive. */
-			ztemp = Z_REFVAL_P(ztemp);
-		}
+        /* May have created a reference while deserializing an object, if it was recursive. */
+        ZVAL_DEREF(ztemp);
 		if (Z_TYPE_P(ztemp) != IS_OBJECT) {
 			zend_error(E_WARNING, "igbinary_unserialize_object preparing to __wakeup: created non-object somehow?", t, igsd->buffer_offset);
 			return 1;
@@ -2312,7 +2311,7 @@ inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *
 /* }}} */
 /* {{{ igbinary_unserialize_ref */
 /** Unserializes array or object by reference. */
-inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *z, int flags TSRMLS_DC) {
+inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *const z, int flags TSRMLS_DC) {
 	size_t n;
 	zval* z_ref = NULL;
 
@@ -2356,15 +2355,18 @@ inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igs
 	 * Permanently convert the zval in IGB_REF_VAL() into a IS_REFERENCE if it wasn't already one.
 	 * TODO: Can there properly be multiple reference groups to an object?
 	 * Similar to https://github.com/php/php-src/blob/master/ext/standard/var_unserializer.re , for "R:"
-	 * Using `flags` because igbinary_unserialize_ref might be used both for copy on writes ($a = $b = [2]) and by PHP references($a = &$b), if I understand correctly.
+	 * Using `flags` because igbinary_unserialize_ref might be used both for copy on writes ($a = $b = [2]) and by PHP references($a = &$b).
 	 */
 	if ((flags & WANT_REF) != 0) {
 		/* Want to create an IS_REFERENCE, not just to share the same value until modified. */
-		ZVAL_MAKE_REF(z_ref); /* Convert original zval data to a reference - probably not necessary */
-		ZVAL_COPY(z, z_ref);
+        ZVAL_COPY(z, z_ref);
+        if (!Z_ISREF_P(z)) {
+            ZVAL_MAKE_REF(z); /* Convert original zval data to a reference and replace the entry in IGB_REF_VAL with that. */
+            IGB_REF_VAL(igsd, n) = z;
+        }
 	} else {
+		ZVAL_DEREF(z_ref);
 		ZVAL_COPY(z, z_ref);
-		ZVAL_DEREF(z);
 	}
 
 	return 0;
@@ -2372,7 +2374,7 @@ inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igs
 /* }}} */
 /* {{{ igbinary_unserialize_zval */
 /** Unserialize zval. */
-static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zval *z, int flags TSRMLS_DC) {
+static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zval *const z, int flags TSRMLS_DC) {
 	enum igbinary_type t;
 
 	long tmp_long;
