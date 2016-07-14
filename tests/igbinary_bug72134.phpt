@@ -8,14 +8,40 @@ class Obj
 }
 $value = new Obj();
 $value->i = 1;
-
 $igb = igbinary_serialize($value);
-for ($i=0; $i<=30; $i++)
+for ($i=0; $i < 30; $i++)
 {
-    // This might segfault at the third attempt
+    // This used to segfault at the third attempt
     echo igbinary_unserialize($igb)->bar . PHP_EOL;
 }
 --EXPECT--
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
+test
 test
 test
 test
