@@ -1,7 +1,7 @@
 igbinary
 ========
 
-[![Build Status](https://travis-ci.org/igbinary/igbinary7.svg?branch=master)](https://travis-ci.org/igbinary/igbinary)
+[![Build Status](https://travis-ci.org/igbinary/igbinary7.svg?branch=master)](https://travis-ci.org/igbinary/igbinary7)
 
 Igbinary is a drop in replacement for the standard php serializer. Instead of
 time and space consuming textual representation, igbinary stores php data
