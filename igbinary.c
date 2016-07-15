@@ -2020,7 +2020,7 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 					if (Z_TYPE_P(prototype_value) == IS_INDIRECT) {
 						prototype_value = Z_INDIRECT_P(prototype_value);
 					}
-					zval_ptr_dtor(prototype_value);
+					convert_to_null(prototype_value);
 				}
 
 				zend_hash_update_ind(h, key_str, &v);
