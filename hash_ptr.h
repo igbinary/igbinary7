@@ -4,7 +4,8 @@
   +----------------------------------------------------------------------+
   | Author: Oleg Grenrus <oleg.grenrus@dynamoid.com>                     |
   | See CREDITS for contributors                                         |
-  | This is like hash.h, but the key is always a zend_uintptr_t			 |
+  | This defines hash_si_ptr.                                            |
+  | It is like hash_si, but the key is always a non-zero zend_uintptr_t  |
   +----------------------------------------------------------------------+
 */
 
@@ -77,13 +78,6 @@ int hash_si_ptr_insert (struct hash_si_ptr *h, const zend_uintptr_t key, uint32_
  * @return 0 if found, 1 if not.
  */
 int hash_si_ptr_find (struct hash_si_ptr *h, const zend_uintptr_t key, uint32_t * value);
-
-/** Travarses hash_si_ptr.
- * Calls traverse_function on every item. Traverse function should not modify hash
- * @param h Pointer to hash_si_ptr struct.
- * @param traverse_function Function to call on every item of hash_si_ptr.
- */
-void hash_si_ptr_traverse (struct hash_si_ptr *h, int (*traverse_function) (const zend_uintptr_t key, uint32_t value));
 
 /** Returns size of hash_si_ptr.
  * @param h Pointer to hash_si_ptr struct.
