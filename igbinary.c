@@ -2042,7 +2042,7 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 		}
 	}
 	if ((flags & WANT_OBJECT) == 0) {
-		array_init_size(z_deref, n + 1);
+		array_init_size(z_deref, n);
 		/* add the new array to the list of unserialized references */
 		if (igsd_append_ref(igsd, z) == SIZE_MAX) {
 			return 1;
@@ -2055,7 +2055,11 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 	}
 
 	h = HASH_OF(z_deref);
-
+	if ((flags & WANT_OBJECT) != 0) {
+		/* Copied from var_unserializer.re. Need to ensure that IGB_REF_VAL doesn't point to invalid data. */
+		/* Worst case: All n of the added properties are dynamic. */
+		zend_hash_extend(h, zend_hash_num_elements(h) + n, (h->u.flags & HASH_FLAG_PACKED));
+	}
 	for (i = 0; i < n; i++) {
 		key = NULL;
 
