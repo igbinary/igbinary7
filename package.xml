@@ -45,6 +45,8 @@
    <file name="config.w32" role="src" />
    <file name="hash.h" role="src" />
    <file name="hash_si.c" role="src" />
+   <file name="hash_ptr.h" role="src" />
+   <file name="hash_si_ptr.c" role="src" />
    <file name="igbinary.c" role="src" />
    <file name="igbinary.h" role="src" />
    <file name="php_igbinary.h" role="src" />
