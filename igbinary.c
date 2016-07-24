@@ -170,6 +170,10 @@ struct igbinary_unserialize_data {
 	size_t references_count;		/**< Unserialized array/objects count. */
 	size_t references_capacity;		/**< Unserialized array/object array capacity. */
 
+	zval *wakeup;					/**< zvals of type IS_OBJECT for calls to __wakeup. */
+	size_t wakeup_count;			/**< count of objects in array for calls to __wakeup */
+	size_t wakeup_capacity;			/**< capacity of objects in array for calls to __wakeup */
+
 	int error;						/**< Error number. Not used. */
 	smart_string string0_buf;			/**< Temporary buffer for strings */
 };
@@ -398,7 +402,47 @@ static inline size_t igsd_append_ref(struct igbinary_unserialize_data *igsd, zva
 	IGB_REF_VAL(igsd, ref_n) = z;
 	return ref_n;
 }
+
+static inline int igsd_defer_wakeup(struct igbinary_unserialize_data *igsd, zval* z) {
+	if (igsd->wakeup_count >= igsd->wakeup_capacity) {
+		if (igsd->wakeup_capacity == 0) {
+			igsd->wakeup_capacity = 2;
+			igsd->wakeup = emalloc(sizeof(igsd->wakeup[0]) * igsd->wakeup_capacity);
+		} else {
+			igsd->wakeup_capacity *= 2;
+			igsd->wakeup = erealloc(igsd->wakeup, sizeof(igsd->wakeup[0]) * igsd->wakeup_capacity);
+			if (igsd->wakeup == NULL) {
+				return 1;
+			}
+		}
+	}
+
+	ZVAL_COPY(&igsd->wakeup[igsd->wakeup_count], z);
+	igsd->wakeup_count++;
+	return 0;
+}
 /* }}} */
+
+/* {{{ igbinary_finish_wakeup }}} */
+static int igbinary_finish_wakeup(struct igbinary_unserialize_data* igsd TSRMLS_DC) {
+	if (igsd->wakeup_count == 0) { /* nothing to do */
+		return 0;
+	}
+	zval h;
+	zval f;
+	size_t i;
+	ZVAL_STRINGL(&f, "__wakeup", sizeof("__wakeup") - 1);
+	for (i = 0; i < igsd->wakeup_count; i++) {
+		call_user_function_ex(CG(function_table), &(igsd->wakeup[i]), &f, &h, 0, 0, 1, NULL TSRMLS_CC);
+		zval_ptr_dtor(&h);
+		if (EG(exception)) {
+			zval_dtor(&f);
+			return 1;
+		}
+	}
+	zval_dtor(&f);
+	return 0;
+}
 
 /* {{{ Memory allocator wrappers */
 static inline void *igbinary_mm_wrapper_malloc(size_t size, void *context)
@@ -482,6 +526,10 @@ IGBINARY_API int igbinary_unserialize(const uint8_t *buf, size_t buf_len, zval *
 		return 1;
 	}
 
+	if (igbinary_finish_wakeup(&igsd TSRMLS_CC)) {
+		igbinary_unserialize_data_deinit(&igsd TSRMLS_CC);
+		return 1;
+	}
 	igbinary_unserialize_data_deinit(&igsd TSRMLS_CC);
 
 	return 0;
@@ -1008,10 +1056,10 @@ inline static int igbinary_serialize_array(struct igbinary_serialize_data *igsd,
 
 	zend_string *key;
 	ulong key_index;
-	
+
 	z_original = z;
 	ZVAL_DEREF(z);
-	
+
 	/* hash */
 	h = object ? Z_OBJPROP_P(z) : HASH_OF(z);
 
@@ -1023,7 +1071,7 @@ inline static int igbinary_serialize_array(struct igbinary_serialize_data *igsd,
 		--n;
 	}
 
-	/* if it is an array or a reference to an array, then add a reference unique to that **reference** to that array */ 
+	/* if it is an array or a reference to an array, then add a reference unique to that **reference** to that array */
 	if (!object && igbinary_serialize_array_ref(igsd, z_original, false TSRMLS_CC) == 0) {
 		return 0;
 	}
@@ -1642,6 +1690,10 @@ inline static int igbinary_unserialize_data_init(struct igbinary_unserialize_dat
 		return 1;
 	}
 
+	/** Don't bother allocating zvals which __wakeup, probably not common */
+	igsd->wakeup = NULL;
+	igsd->wakeup_count = 0;
+	igsd->wakeup_capacity = 0;
 
 	return 0;
 }
@@ -1657,6 +1709,14 @@ inline static void igbinary_unserialize_data_deinit(struct igbinary_unserialize_
 	if (igsd->references) {
 		efree(igsd->references);
 		igsd->references = NULL;
+	}
+	if (igsd->wakeup) {
+		size_t i;
+		size_t n = igsd->wakeup_count;
+		for (i = 0; i < n; i++) {
+			convert_to_null(&igsd->wakeup[i]);
+		}
+		efree(igsd->wakeup);
 	}
 
 	smart_string_free(&igsd->string0_buf);
@@ -1982,7 +2042,7 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 		}
 	}
 	if ((flags & WANT_OBJECT) == 0) {
-		array_init_size(z_deref, n + 1);
+		array_init_size(z_deref, n);
 		/* add the new array to the list of unserialized references */
 		if (igsd_append_ref(igsd, z) == SIZE_MAX) {
 			return 1;
@@ -1995,7 +2055,11 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 	}
 
 	h = HASH_OF(z_deref);
-
+	if ((flags & WANT_OBJECT) != 0) {
+		/* Copied from var_unserializer.re. Need to ensure that IGB_REF_VAL doesn't point to invalid data. */
+		/* Worst case: All n of the added properties are dynamic. */
+		zend_hash_extend(h, zend_hash_num_elements(h) + n, (h->u.flags & HASH_FLAG_PACKED));
+	}
 	for (i = 0; i < n; i++) {
 		key = NULL;
 
@@ -2160,8 +2224,6 @@ inline static int igbinary_unserialize_object_ser(struct igbinary_unserialize_da
 inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zval *const z, int flags TSRMLS_DC) {
 	zend_class_entry *ce;
 
-	zval h;
-	zval f;
 	size_t ref_n;
 
 	zend_string *class_name;
@@ -2297,14 +2359,7 @@ inline static int igbinary_unserialize_object(struct igbinary_unserialize_data *
 		ztemp_ce = Z_OBJCE_P(ztemp);
 		if (ztemp_ce != PHP_IC_ENTRY &&
 			zend_hash_str_exists(&ztemp_ce->function_table, "__wakeup", sizeof("__wakeup") - 1)) {
-			ZVAL_UNDEF(&h);
-			ZVAL_STRINGL(&f, "__wakeup", sizeof("__wakeup") - 1);
-			call_user_function_ex(CG(function_table), ztemp, &f, &h, 0, 0, 1, NULL TSRMLS_CC);
-
-			zval_dtor(&f);
-			zval_ptr_dtor(&h);
-
-			if (EG(exception)) {
+			if (igsd_defer_wakeup(igsd, ztemp)) {
 				r = 1;
 			}
 		}
