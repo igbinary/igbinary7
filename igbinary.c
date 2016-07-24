@@ -24,8 +24,8 @@
 #if PHP_MAJOR_VERSION >= 7
 /* FIXME: still fix sessions and the APC-thingy */
 # undef HAVE_PHP_SESSION
+/* There isn't a php7 release of apc. apcu and apcu_bc provide the apc_* methods */
 # undef HAVE_APC_SUPPORT
-# undef HAVE_APCU_SUPPORT
 #endif
 
 #if HAVE_PHP_SESSION
@@ -37,13 +37,7 @@
 
 #if defined(HAVE_APCU_SUPPORT)
 # include "ext/apcu/apc_serializer.h"
-#elif defined(HAVE_APC_SUPPORT)
-# if USE_BUNDLED_APC
-#  include "apc_serializer.h"
-# else
-#  include "ext/apc/apc_serializer.h"
-# endif
-#endif /* HAVE_APCU_SUPPORT || HAVE_APC_SUPPORT */
+#endif /* HAVE_APCU_SUPPORT */
 
 #include "php_igbinary.h"
 
@@ -67,7 +61,7 @@
 PS_SERIALIZER_FUNCS(igbinary);
 #endif /* HAVE_PHP_SESSION */
 
-#if defined(HAVE_APC_SUPPORT) || defined(HAVE_APCU_SUPPORT)
+#if defined(HAVE_APCU_SUPPORT)
 /** Apc serializer function prototypes */
 static int APC_SERIALIZER_NAME(igbinary) (APC_SERIALIZER_ARGS);
 static int APC_UNSERIALIZER_NAME(igbinary) (APC_UNSERIALIZER_ARGS);
@@ -259,7 +253,6 @@ zend_function_entry igbinary_functions[] = {
 /* }}} */
 
 /* {{{ igbinary dependencies */
-#if ZEND_MODULE_API_NO >= 20050922
 static const zend_module_dep igbinary_module_deps[] = {
 	ZEND_MOD_REQUIRED("standard")
 #ifdef HAVE_PHP_SESSION
@@ -267,9 +260,6 @@ static const zend_module_dep igbinary_module_deps[] = {
 #endif
 #if defined(HAVE_APCU_SUPPORT)
 	ZEND_MOD_OPTIONAL("apcu")
-#elif defined(HAVE_APC_SUPPORT)
-	ZEND_MOD_OPTIONAL("apc")
-#endif
 	ZEND_MOD_END
 };
 #endif
@@ -329,7 +319,7 @@ PHP_MINIT_FUNCTION(igbinary) {
 		PS_SERIALIZER_DECODE_NAME(igbinary));
 #endif
 
-#if defined(HAVE_APC_SUPPORT) || defined(HAVE_APCU_SUPPORT)
+#if defined(HAVE_APCU_SUPPORT)
 	apc_register_serializer("igbinary",
 		APC_SERIALIZER_NAME(igbinary),
 		APC_UNSERIALIZER_NAME(igbinary),
@@ -366,8 +356,6 @@ PHP_MINFO_FUNCTION(igbinary) {
 	php_info_print_table_row(2, "igbinary version", PHP_IGBINARY_VERSION);
 #if defined(HAVE_APCU_SUPPORT)
 	php_info_print_table_row(2, "igbinary APCU serializer ABI", APC_SERIALIZER_ABI);
-#elif defined(HAVE_APC_SUPPORT)
-	php_info_print_table_row(2, "igbinary APC serializer ABI", APC_SERIALIZER_ABI);
 #else
 	php_info_print_table_row(2, "igbinary APC serializer ABI", "no");
 #endif
@@ -682,7 +670,7 @@ PS_SERIALIZER_DECODE_FUNC(igbinary) {
 /* }}} */
 #endif /* HAVE_PHP_SESSION */
 
-#if defined(HAVE_APC_SUPPORT) || defined(HAVE_APCU_SUPPORT)
+#if defined(HAVE_APCU_SUPPORT)
 /* {{{ apc_serialize function */
 static int APC_SERIALIZER_NAME(igbinary) ( APC_SERIALIZER_ARGS ) {
 	(void)config;
@@ -699,11 +687,12 @@ static int APC_UNSERIALIZER_NAME(igbinary) ( APC_UNSERIALIZER_ARGS ) {
 	(void)config;
 
 	if (igbinary_unserialize(buf, buf_len, value TSRMLS_CC) == 0) {
-		/* flipped semantics */
+		/* flipped semantics - Succeeded. */
 		return 1;
 	}
-	zval_dtor(*value);
-	(*value)->type = IS_NULL;
+	/* Failed. free return value */
+	zval_ptr_dtor(value);
+	ZVAL_NULL(value); /* and replace the incomplete value with null just in case APCU uses it in the future */
 	return 0;
 }
 /* }}} */

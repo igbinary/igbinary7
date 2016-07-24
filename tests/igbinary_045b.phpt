@@ -23,10 +23,10 @@ class Bar {
 }
 
 $a = new Bar;
-apc_store('foo', $a);
+apcu_store('foo', $a);
 unset($a);
 
-var_dump(apc_fetch('foo'));
+var_dump(apcu_fetch('foo'));
 --EXPECTF--
 igbinary
 object(Bar)#%d (1) {
