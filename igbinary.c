@@ -60,6 +60,7 @@
 
 #include <stddef.h>
 #include "hash.h"
+#include "hash_ptr.h"
 
 #if HAVE_PHP_SESSION
 /** Session serializer function prototypes. */
@@ -138,7 +139,7 @@ struct igbinary_serialize_data {
 	bool scalar;				/**< Serializing scalar. */
 	bool compact_strings;		/**< Check for duplicate strings. */
 	struct hash_si strings;		/**< Hash of already serialized strings. */
-	struct hash_si references;	/**< Hash of already serialized potential references. */
+	struct hash_si_ptr references;	/**< Hash of already serialized potential references. (non-NULL uintptr_t => int32_t) */
 	int references_id;		/**< Number of things that the unserializer might think are references. >= length of references */
 	int string_count;			/**< Serialized string count, used for back referencing */
 	int error;					/**< Error number. Not used. */
@@ -203,7 +204,7 @@ inline static int igbinary_serialize64(struct igbinary_serialize_data *igsd, uin
 
 inline static int igbinary_serialize_null(struct igbinary_serialize_data *igsd TSRMLS_DC);
 inline static int igbinary_serialize_bool(struct igbinary_serialize_data *igsd, int b TSRMLS_DC);
-inline static int igbinary_serialize_long(struct igbinary_serialize_data *igsd, long l TSRMLS_DC);
+inline static int igbinary_serialize_long(struct igbinary_serialize_data *igsd, zend_long l TSRMLS_DC);
 inline static int igbinary_serialize_double(struct igbinary_serialize_data *igsd, double d TSRMLS_DC);
 inline static int igbinary_serialize_string(struct igbinary_serialize_data *igsd, char *s, size_t len TSRMLS_DC);
 inline static int igbinary_serialize_chararray(struct igbinary_serialize_data *igsd, const char *s, size_t len TSRMLS_DC);
@@ -227,7 +228,7 @@ inline static uint16_t igbinary_unserialize16(struct igbinary_unserialize_data *
 inline static uint32_t igbinary_unserialize32(struct igbinary_unserialize_data *igsd TSRMLS_DC);
 inline static uint64_t igbinary_unserialize64(struct igbinary_unserialize_data *igsd TSRMLS_DC);
 
-inline static int igbinary_unserialize_long(struct igbinary_unserialize_data *igsd, enum igbinary_type t, long *ret TSRMLS_DC);
+inline static int igbinary_unserialize_long(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zend_long *ret TSRMLS_DC);
 inline static int igbinary_unserialize_double(struct igbinary_unserialize_data *igsd, enum igbinary_type t, double *ret TSRMLS_DC);
 inline static int igbinary_unserialize_string(struct igbinary_unserialize_data *igsd, enum igbinary_type t, char **s, size_t *len TSRMLS_DC);
 inline static int igbinary_unserialize_chararray(struct igbinary_unserialize_data *igsd, enum igbinary_type t, char **s, size_t *len TSRMLS_DC);
@@ -736,7 +737,7 @@ inline static int igbinary_serialize_data_init(struct igbinary_serialize_data *i
 	igsd->scalar = scalar;
 	if (!igsd->scalar) {
 		hash_si_init(&igsd->strings, 16);
-		hash_si_init(&igsd->references, 16);
+		hash_si_ptr_init(&igsd->references, 16);
 		igsd->references_id = 0;
 	}
 
@@ -754,7 +755,7 @@ inline static void igbinary_serialize_data_deinit(struct igbinary_serialize_data
 
 	if (!igsd->scalar) {
 		hash_si_deinit(&igsd->strings);
-		hash_si_deinit(&igsd->references);
+		hash_si_ptr_deinit(&igsd->references);
 	}
 }
 /* }}} */
@@ -853,15 +854,14 @@ inline static int igbinary_serialize_bool(struct igbinary_serialize_data *igsd, 
 }
 /* }}} */
 /* {{{ igbinary_serialize_long */
-/** Serializes long. */
-/* FIXME this should probably be zend_long for 32-bit builds, php7 got rid of 32-bit longs */
-inline static int igbinary_serialize_long(struct igbinary_serialize_data *igsd, long l TSRMLS_DC) {
-	long k = l >= 0 ? l : -l;
+/** Serializes zend_long. */
+inline static int igbinary_serialize_long(struct igbinary_serialize_data *igsd, zend_long l TSRMLS_DC) {
+	zend_long k = l >= 0 ? l : -l;
 	bool p = l >= 0 ? true : false;
 
-	/* -LONG_MIN is 0 otherwise. */
-	if (l == LONG_MIN) {
-#if SIZEOF_LONG == 8
+	/* -ZEND_LONG_MIN is 0 otherwise. */
+	if (l == ZEND_LONG_MIN) {
+#if SIZEOF_ZEND_LONG == 8
 		if (igbinary_serialize8(igsd, (uint8_t) igbinary_type_long64n TSRMLS_CC) != 0) {
 			return 1;
 		}
@@ -869,7 +869,7 @@ inline static int igbinary_serialize_long(struct igbinary_serialize_data *igsd, 
 		if (igbinary_serialize64(igsd, (uint64_t) 0x8000000000000000 TSRMLS_CC) != 0) {
 			return 1;
 		}
-#elif SIZEOF_LONG == 4
+#elif SIZEOF_ZEND_LONG == 4
 		if (igbinary_serialize8(igsd, (uint8_t) igbinary_type_long32n TSRMLS_CC) != 0) {
 			return 1;
 		}
@@ -877,7 +877,7 @@ inline static int igbinary_serialize_long(struct igbinary_serialize_data *igsd, 
 			return 1;
 		}
 #else
-#error "Strange sizeof(long)."
+#error "Strange sizeof(zend_long)."
 #endif
 		return 0;
 	}
@@ -925,7 +925,7 @@ inline static int igbinary_serialize_long(struct igbinary_serialize_data *igsd, 
 		}
 	}
 #else
-#error "Strange sizeof(long)."
+#error "Strange sizeof(zend_long)."
 #endif
 
 	return 0;
@@ -1055,7 +1055,7 @@ inline static int igbinary_serialize_array(struct igbinary_serialize_data *igsd,
 	zval *z_original;
 
 	zend_string *key;
-	ulong key_index;
+	zend_long key_index;
 
 	z_original = z;
 	ZVAL_DEREF(z);
@@ -1155,7 +1155,7 @@ inline static int igbinary_serialize_array(struct igbinary_serialize_data *igsd,
 inline static int igbinary_serialize_array_ref(struct igbinary_serialize_data *igsd, zval *z, bool object TSRMLS_DC) {
 	uint32_t t = 0;
 	uint32_t *i = &t;
-	zend_ulong key = 0;  /* The numeric value of the pointer to the zend_refcounted struct */
+	zend_uintptr_t key = 0;  /* The address of the pointer to the zend_refcounted struct or other struct */
 
 	/* Similar to php_var_serialize_intern's first part, as well as php_add_var_hash, for printing R: (reference) or r:(object) */
 	/* However, it differs from the built in serialize() in that references to objects are preserved when serializing and unserializing? (TODO check, test for backwards compatibility) */
@@ -1164,16 +1164,16 @@ inline static int igbinary_serialize_array_ref(struct igbinary_serialize_data *i
 	/* If I do, then more tests fail. */
 	/* is_ref || IS_OBJECT implies it has a unique refcounted struct */
 	if (object && Z_TYPE_P(z) == IS_OBJECT) {
-          key = (zend_ulong) Z_OBJ_HANDLE_P(z); /* expand uint32_t to long */
+          key = (zend_uintptr_t) Z_OBJ_HANDLE_P(z); /* expand object handle(uint32_t), cast to 32-bit/64-bit pointer */
 	} else if (is_ref) {
 		/* NOTE: PHP removed switched from `zval*` to `zval` for the values stored in HashTables. If an array has two references to the same ZVAL, then those references will have different zvals. We use Z_COUNTED_P(ref), which will be the same iff the references are the same */
 	  	/* IS_REF implies there is a unique reference counting pointer for the reference */
-	  	key = (zend_ulong) (zend_uintptr_t) Z_COUNTED_P(z);
+	  	key = (zend_uintptr_t) Z_COUNTED_P(z);
 	} else if (Z_TYPE_P(z) == IS_ARRAY) {
 		if (Z_REFCOUNTED_P(z)) {
-			key = (zend_ulong) (zend_uintptr_t) Z_COUNTED_P(z);
+			key = (zend_uintptr_t) Z_COUNTED_P(z);
 		} else { /* Not sure if this could be a constant */
-			key = (zend_ulong) (zend_uintptr_t) z;
+			key = (zend_uintptr_t) z;
 		}
 	} else {
 		/* Nothing else is going to reference this when this is serialized, this isn't ref counted or an object, shouldn't be reached. */
@@ -1183,13 +1183,13 @@ inline static int igbinary_serialize_array_ref(struct igbinary_serialize_data *i
 		return 1;
 	}
 
-	if (hash_si_find(&igsd->references, (const char*) &key, sizeof(key), i) == 1) {
+	if (hash_si_ptr_find(&igsd->references, key, i) == 1) {
 		t = igsd->references_id++;
 		/* FIXME hack? If the top-level element was an array, we assume that it can't be a reference when we serialize it, */
 		/* because that's the way it was serialized in php5. */
 		/* Does this work with different forms of recursive arrays? */
 		if (t > 0 || object) {
-			hash_si_insert(&igsd->references, (const char*) &key, sizeof(key), t);  /* TODO: Add a specialization for fixed-length numeric keys? */
+			hash_si_ptr_insert(&igsd->references, key, t);  /* TODO: Add a specialization for fixed-length numeric keys? */
 		}
 		return 1;
 	} else {
@@ -1788,8 +1788,8 @@ inline static uint64_t igbinary_unserialize64(struct igbinary_unserialize_data *
 }
 /* }}} */
 /* {{{ igbinary_unserialize_long */
-/** Unserializes long */
-inline static int igbinary_unserialize_long(struct igbinary_unserialize_data *igsd, enum igbinary_type t, long *ret TSRMLS_DC) {
+/** Unserializes zend_long */
+inline static int igbinary_unserialize_long(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zend_long *ret TSRMLS_DC) {
 	uint32_t tmp32;
 #if SIZEOF_LONG == 8
 	uint64_t tmp64;
@@ -1801,14 +1801,14 @@ inline static int igbinary_unserialize_long(struct igbinary_unserialize_data *ig
 			return 1;
 		}
 
-		*ret = (long) (t == igbinary_type_long8n ? -1 : 1) * igbinary_unserialize8(igsd TSRMLS_CC);
+		*ret = (zend_long) (t == igbinary_type_long8n ? -1 : 1) * igbinary_unserialize8(igsd TSRMLS_CC);
 	} else if (t == igbinary_type_long16p || t == igbinary_type_long16n) {
 		if (igsd->buffer_offset + 2 > igsd->buffer_size) {
 			zend_error(E_WARNING, "igbinary_unserialize_long: end-of-data");
 			return 1;
 		}
 
-		*ret = (long) (t == igbinary_type_long16n ? -1 : 1) * igbinary_unserialize16(igsd TSRMLS_CC);
+		*ret = (zend_long) (t == igbinary_type_long16n ? -1 : 1) * igbinary_unserialize16(igsd TSRMLS_CC);
 	} else if (t == igbinary_type_long32p || t == igbinary_type_long32n) {
 		if (igsd->buffer_offset + 4 > igsd->buffer_size) {
 			zend_error(E_WARNING, "igbinary_unserialize_long: end-of-data");
@@ -1817,15 +1817,15 @@ inline static int igbinary_unserialize_long(struct igbinary_unserialize_data *ig
 
 		/* check for boundaries */
 		tmp32 = igbinary_unserialize32(igsd TSRMLS_CC);
-#if SIZEOF_LONG == 4
+#if SIZEOF_ZEND_LONG == 4
 		if (tmp32 > 0x80000000 || (tmp32 == 0x80000000 && t == igbinary_type_long32p)) {
 			zend_error(E_WARNING, "igbinary_unserialize_long: 64bit long on 32bit platform?");
 			tmp32 = 0; /* t == igbinary_type_long32p ? LONG_MAX : LONG_MIN; */
 		}
 #endif
-		*ret = (long) (t == igbinary_type_long32n ? -1 : 1) * tmp32;
+		*ret = (zend_long) (t == igbinary_type_long32n ? -1 : 1) * tmp32;
 	} else if (t == igbinary_type_long64p || t == igbinary_type_long64n) {
-#if SIZEOF_LONG == 8
+#if SIZEOF_ZEND_LONG == 8
 		if (igsd->buffer_offset + 8 > igsd->buffer_size) {
 			zend_error(E_WARNING, "igbinary_unserialize_long: end-of-data");
 			return 1;
@@ -1838,14 +1838,14 @@ inline static int igbinary_unserialize_long(struct igbinary_unserialize_data *ig
 			tmp64 = 0; /* t == igbinary_type_long64p ? LONG_MAX : LONG_MIN */;
 		}
 
-		*ret = (long) (t == igbinary_type_long64n ? -1 : 1) * tmp64;
-#elif SIZEOF_LONG == 4
+		*ret = (zend_long) (t == igbinary_type_long64n ? -1 : 1) * tmp64;
+#elif SIZEOF_ZEND_LONG == 4
 		/* can't put 64bit long into 32bit one, placeholder zero */
 		*ret = 0;
 		igbinary_unserialize64(igsd TSRMLS_CC);
 		zend_error(E_WARNING, "igbinary_unserialize_long: 64bit long on 32bit platform");
 #else
-#error "Strange sizeof(long)."
+#error "Strange sizeof(zend_long)."
 #endif
 	} else {
 		*ret = 0;
@@ -1999,7 +1999,7 @@ inline static int igbinary_unserialize_array(struct igbinary_unserialize_data *i
 
 	char *key;
 	size_t key_len = 0;
-	long key_index = 0;
+	zend_long key_index = 0;
 
 	enum igbinary_type key_type;
 
@@ -2438,7 +2438,7 @@ inline static int igbinary_unserialize_ref(struct igbinary_unserialize_data *igs
 static int igbinary_unserialize_zval(struct igbinary_unserialize_data *igsd, zval *const z, int flags TSRMLS_DC) {
 	enum igbinary_type t;
 
-	long tmp_long;
+	zend_long tmp_long;
 	double tmp_double;
 	char *tmp_chararray;
 	size_t tmp_size_t;
