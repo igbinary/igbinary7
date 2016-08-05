@@ -624,7 +624,7 @@ PS_SERIALIZER_DECODE_FUNC(igbinary) {
 	HashPosition tmp_hash_pos;
 	HashTable *tmp_hash;
 	char *key_str;
-	ulong key_long;
+	zend_ulong key_long;
 	int tmp_int;
 	uint key_len;
 	zval *z;
@@ -898,7 +898,7 @@ inline static int igbinary_serialize_long(struct igbinary_serialize_data *igsd, 
 		if (igbinary_serialize16(igsd, (uint16_t) k TSRMLS_CC) != 0) {
 			return 1;
 		}
-#if SIZEOF_LONG == 8
+#if SIZEOF_ZEND_LONG == 8
 	} else if (k <= 0xffffffff) {
 		if (igbinary_serialize8(igsd, (uint8_t) (p ? igbinary_type_long32p : igbinary_type_long32n) TSRMLS_CC) != 0) {
 			return 1;
@@ -915,7 +915,7 @@ inline static int igbinary_serialize_long(struct igbinary_serialize_data *igsd, 
 			return 1;
 		}
 	}
-#elif SIZEOF_LONG == 4
+#elif SIZEOF_ZEND_LONG == 4
 	} else {
 		if (igbinary_serialize8(igsd, (uint8_t) (p ? igbinary_type_long32p : igbinary_type_long32n) TSRMLS_CC) != 0) {
 			return 1;
@@ -1791,7 +1791,7 @@ inline static uint64_t igbinary_unserialize64(struct igbinary_unserialize_data *
 /** Unserializes zend_long */
 inline static int igbinary_unserialize_long(struct igbinary_unserialize_data *igsd, enum igbinary_type t, zend_long *ret TSRMLS_DC) {
 	uint32_t tmp32;
-#if SIZEOF_LONG == 8
+#if SIZEOF_ZEND_LONG == 8
 	uint64_t tmp64;
 #endif
 
