@@ -1,6 +1,11 @@
 igbinary
 ========
 
+**This has been merged into the master branch of [igbinary/igbinary](https://github.com/igbinary/igbinary)**, 
+in [a subfolder](https://github.com/igbinary/igbinary/tree/master/src/php7).
+Installation steps and PRs should refer to igbinary/igbinary instead.
+(igbinary/igbinary is compatible with both php5 and php7 now)
+
 [![Build Status](https://travis-ci.org/igbinary/igbinary7.svg?branch=master)](https://travis-ci.org/igbinary/igbinary7)
 
 Igbinary is a drop in replacement for the standard php serializer. Instead of
